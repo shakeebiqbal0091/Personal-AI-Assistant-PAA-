@@ -2,6 +2,11 @@
 from dataclasses import dataclass
 from typing import Any
 
+from app.database.memory_repository import (
+    ALLOWED_MEMORY_CATEGORIES,
+    MAX_MEMORY_CONTENT_LENGTH,
+)
+
 
 @dataclass
 class Intent:
@@ -17,6 +22,8 @@ class IntentRouter:
         "list_tasks",
         "complete_task",
         "delete_task",
+        "search_memories",
+        "propose_memory",
     }
 
     @staticmethod
@@ -84,10 +91,55 @@ class IntentRouter:
                 arguments={"task_id": task_id},
             )
 
+        if intent_name == "search_memories":
+            if set(arguments) != {"query"}:
+                raise ValueError("Invalid search_memories arguments.")
+
+            query = arguments["query"]
+            if not isinstance(query, str):
+                raise ValueError("Memory search query must be text.")
+
+            return Intent(
+                name=intent_name,
+                arguments={"query": query.strip()},
+            )
+
+        if intent_name == "propose_memory":
+            if set(arguments) != {"content", "category"}:
+                raise ValueError("Invalid propose_memory arguments.")
+
+            content = arguments["content"]
+            category = arguments["category"]
+            if not isinstance(content, str) or not content.strip():
+                raise ValueError("Proposed memory content cannot be empty.")
+            if len(content.strip()) > MAX_MEMORY_CONTENT_LENGTH:
+                raise ValueError(
+                    "Proposed memory content cannot exceed "
+                    f"{MAX_MEMORY_CONTENT_LENGTH} characters."
+                )
+            if category is not None and (
+                not isinstance(category, str)
+                or category not in ALLOWED_MEMORY_CATEGORIES
+            ):
+                raise ValueError("Invalid proposed memory category.")
+
+            return Intent(
+                name=intent_name,
+                arguments={
+                    "content": content.strip(),
+                    "category": category,
+                },
+            )
+
         raise ValueError("Unable to validate intent.")
 
     @staticmethod
-    def route(intent_name: str, arguments: dict, task_manager):
+    def route(
+        intent_name: str,
+        arguments: dict,
+        task_manager,
+        memory_repository=None,
+    ):
 
         intent = IntentRouter.validate(
             intent_name,
@@ -166,5 +218,50 @@ class IntentRouter:
                 "message": (
                     "The task has not been deleted. It is awaiting explicit "
                     "user confirmation in Streamlit."
+                ),
+            }
+
+        if intent.name == "search_memories":
+            if memory_repository is None:
+                return {
+                    "success": False,
+                    "intent": intent.name,
+                    "message": "Memory search is unavailable.",
+                }
+
+            memories = memory_repository.retrieve_relevant_memories(
+                intent.arguments["query"]
+            )
+            records = [
+                {
+                    "id": memory["id"],
+                    "content": memory["content"],
+                    "category": memory["category"],
+                    "created_at": memory["created_at"],
+                    "updated_at": memory["updated_at"],
+                }
+                for memory in memories
+            ]
+            return {
+                "success": True,
+                "intent": intent.name,
+                "memories": records,
+                "count": len(records),
+                "message": (
+                    "Matching saved memory records were found."
+                    if records
+                    else "No matching saved memory records were found."
+                ),
+            }
+
+        if intent.name == "propose_memory":
+            return {
+                "success": True,
+                "intent": intent.name,
+                "pending_confirmation": True,
+                "proposal": intent.arguments,
+                "message": (
+                    "This memory proposal has not been saved. It requires "
+                    "explicit confirmation in Streamlit."
                 ),
             }

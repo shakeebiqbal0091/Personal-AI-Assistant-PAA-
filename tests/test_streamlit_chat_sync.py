@@ -314,10 +314,10 @@ def test_switching_conversations_replaces_displayed_history(monkeypatch):
     FakeAssistant.default_conversation_id = None
 
     app = _run_app(monkeypatch)
-    app.selectbox[0].select("Alpha (#1)").run()
+    app.selectbox(key="conversation_select_None").select("Alpha (#1)").run()
     assert _rendered_bubbles(app) == ["Alpha conversation"]
 
-    app.selectbox[0].select("Beta (#2)").run()
+    app.selectbox(key="conversation_select_1").select("Beta (#2)").run()
 
     assert _rendered_bubbles(app) == ["Beta conversation", "Beta reply"]
     assert all("Alpha" not in bubble for bubble in _rendered_bubbles(app))
@@ -406,7 +406,9 @@ def test_cancel_pending_delete_leaves_task_intact(monkeypatch):
 def test_switching_conversations_clears_pending_delete(monkeypatch):
     app = _request_pending_delete(monkeypatch, other_conversation=True)
 
-    app.selectbox[0].select("Other conversation (#2)").run()
+    app.selectbox(key="conversation_select_1").select(
+        "Other conversation (#2)"
+    ).run()
 
     assert not any(button.label == "Confirm Delete" for button in app.button)
     assert FakeTaskManager.deleted_ids == []
