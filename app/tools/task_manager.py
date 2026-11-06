@@ -72,3 +72,20 @@ class TaskManager:
                 )
 
                 return cursor.rowcount > 0
+
+    def delete_task_if_unchanged(
+        self, task_id, title, description, status
+    ):
+        with get_connection(self.db_path) as connection:
+            with connection:
+                cursor = connection.execute(
+                    """
+                    DELETE FROM tasks
+                    WHERE id = ?
+                      AND title = ?
+                      AND description IS ?
+                      AND status = ?
+                    """,
+                    (task_id, title, description, status),
+                )
+                return cursor.rowcount > 0

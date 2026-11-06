@@ -130,6 +130,45 @@ def test_route_create_task():
     )
 
 
+def test_route_delete_task_requests_confirmation_without_deleting():
+    manager = MagicMock()
+    manager.list_tasks.return_value = [
+        {
+            "id": 5,
+            "title": "Temporary task",
+            "description": "Review before removal",
+            "status": "pending",
+        }
+    ]
+
+    result = IntentRouter.route(
+        "delete_task",
+        {"task_id": 5},
+        manager,
+    )
+
+    assert result["pending_confirmation"] is True
+    assert result["deleted"] is False
+    assert result["task"] == manager.list_tasks.return_value[0]
+    manager.delete_task.assert_not_called()
+
+
+def test_route_delete_task_missing_returns_no_pending_request():
+    manager = MagicMock()
+    manager.list_tasks.return_value = []
+
+    result = IntentRouter.route(
+        "delete_task",
+        {"task_id": 5},
+        manager,
+    )
+
+    assert result["success"] is False
+    assert "not found" in result["message"]
+    assert "pending_confirmation" not in result
+    manager.delete_task.assert_not_called()
+
+
 def test_invalid_request_never_calls_task_manager():
 
     manager = MagicMock()

@@ -163,3 +163,75 @@ def test_failed_first_message_creates_no_conversation(client):
 
     assert assistant.conversation_id is None
     assert assistant.conversation_repository.list_conversations() == []
+
+
+def test_tool_checkpoint_survives_follow_up_failure_without_replay(client):
+    task_manager = MagicMock()
+    task_manager.create_task.return_value = 23
+    assistant = make_assistant(client)
+    assistant.task_manager = task_manager
+
+    tool_call = SimpleNamespace(
+        id="call_create_task",
+        function=SimpleNamespace(
+            name="create_task",
+            arguments='{"title":"Buy milk","description":""}',
+        ),
+        model_dump=lambda: {
+            "id": "call_create_task",
+            "type": "function",
+            "function": {
+                "name": "create_task",
+                "arguments": '{"title":"Buy milk","description":""}',
+            },
+        },
+    )
+    client.chat.completions.create.side_effect = [
+        SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=None,
+                        tool_calls=[tool_call],
+                    )
+                )
+            ]
+        ),
+        RuntimeError("follow-up request failed"),
+        SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content="The task was created.",
+                        tool_calls=None,
+                    )
+                )
+            ]
+        ),
+    ]
+
+    with pytest.raises(RuntimeError, match="follow-up request failed"):
+        assistant.chat("Create a task to buy milk.")
+
+    saved_after_failure = assistant.conversation_repository.get_history(
+        assistant.conversation_id
+    )
+    assert [message["role"] for message in saved_after_failure] == [
+        "user",
+        "assistant",
+        "tool",
+    ]
+    assert saved_after_failure[1]["tool_calls"][0]["id"] == "call_create_task"
+    assert saved_after_failure[2]["tool_call_id"] == "call_create_task"
+    assert '"task_id": 23' in saved_after_failure[2]["content"]
+    assert assistant.conversation_history[1:] == saved_after_failure
+    task_manager.create_task.assert_called_once_with("Buy milk", "")
+
+    assert assistant.chat("Thanks.") == "The task was created."
+
+    next_request = client.chat.completions.create.call_args_list[2].kwargs
+    sent_history = next_request["messages"]
+    assert sent_history[1]["role"] == "user"
+    assert sent_history[2]["tool_calls"][0]["id"] == "call_create_task"
+    assert sent_history[3]["tool_call_id"] == "call_create_task"
+    task_manager.create_task.assert_called_once_with("Buy milk", "")

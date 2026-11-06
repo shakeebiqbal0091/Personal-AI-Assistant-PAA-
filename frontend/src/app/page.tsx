@@ -348,7 +348,7 @@ export default function Dashboard() {
               </h1>
 
               <p>
-                Your day, your goals, your assistant. Let's make
+                Your day, your goals, your assistant. Let&apos;s make
                 today productive.
               </p>
             </div>
@@ -492,7 +492,7 @@ export default function Dashboard() {
                 <div className="panel tasks-panel">
                   <div className="panel-header">
                     <div>
-                      <h3>Today's Tasks</h3>
+                      <h3>Today&apos;s Tasks</h3>
                       <p>Keep track of what needs to get done.</p>
                     </div>
 

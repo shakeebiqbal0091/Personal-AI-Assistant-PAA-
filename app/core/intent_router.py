@@ -135,16 +135,36 @@ class IntentRouter:
             }
 
         if intent.name == "delete_task":
-            success = task_manager.delete_task(
-                intent.arguments["task_id"]
+            task_id = intent.arguments["task_id"]
+            task = next(
+                (
+                    task
+                    for task in task_manager.list_tasks("all")
+                    if task.get("id") == task_id
+                ),
+                None,
             )
 
+            if task is None:
+                return {
+                    "success": False,
+                    "intent": intent.name,
+                    "message": "Task not found.",
+                }
+
             return {
-                "success": success,
+                "success": True,
                 "intent": intent.name,
+                "pending_confirmation": True,
+                "deleted": False,
+                "task": {
+                    "id": task["id"],
+                    "title": task["title"],
+                    "description": task.get("description") or "",
+                    "status": task["status"],
+                },
                 "message": (
-                    "Task deleted successfully."
-                    if success
-                    else "Task not found."
+                    "The task has not been deleted. It is awaiting explicit "
+                    "user confirmation in Streamlit."
                 ),
             }

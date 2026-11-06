@@ -161,7 +161,9 @@ Deleting a task is a destructive action.
 Before deleting:
 - Identify the exact task.
 - Verify its actual ID.
-- Ask for clarification if the target is uncertain.
+- Request deletion with the delete_task tool only when the target is clear.
+- The tool only requests deletion; it does not delete the task.
+- Never say deletion succeeded. The user must confirm in Streamlit first.
 
 Never delete a task based on an assumed or invented task ID.
 
@@ -246,7 +248,10 @@ TASK_TOOLS = [
         "type": "function",
         "function": {
             "name": "delete_task",
-            "description": "Delete a personal task.",
+            "description": (
+                "Request deletion of a personal task. The task is not deleted "
+                "until the user confirms in Streamlit."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -401,7 +406,9 @@ class PersonalAssistant:
         if not user_message:
             raise ValueError("Message cannot be empty.")
 
-        original_length = len(self.conversation_history)
+        original_history = list(self.conversation_history)
+        last_persisted_history = None
+        delete_task_results = []
 
         self.conversation_history.append(
             {"role": "user", "content": user_message}
@@ -428,6 +435,26 @@ class PersonalAssistant:
                             "The AI returned an empty response."
                         )
 
+                    if delete_task_results:
+                        messages = []
+                        for result in delete_task_results:
+                            if result.get("pending_confirmation"):
+                                task = result["task"]
+                                messages.append(
+                                    f"I found '{task['title']}' (ID "
+                                    f"{task['id']}). Please review and confirm "
+                                    "the deletion in the app. No task has been "
+                                    "deleted."
+                                )
+                            else:
+                                messages.append(
+                                    result.get(
+                                        "message",
+                                        "The deletion request could not be "
+                                        "completed.",
+                                    )
+                                )
+                        assistant_message = " ".join(messages)
                     self.conversation_history.append(
                         {"role": "assistant", "content": assistant_message}
                     )
@@ -464,6 +491,9 @@ class PersonalAssistant:
                             "message": "Invalid tool arguments.",
                         }
 
+                    if call.function.name == "delete_task":
+                        delete_task_results.append(result)
+
                     self.conversation_history.append(
                         {
                             "role": "tool",
@@ -472,12 +502,16 @@ class PersonalAssistant:
                         }
                     )
 
+                self._persist()
+                last_persisted_history = list(self.conversation_history)
+
             raise RuntimeError("Maximum tool execution rounds reached.")
 
         except Exception:
-            # Nothing is persisted mid-turn, so restoring memory is enough.
             self.conversation_history = (
-                self.conversation_history[:original_length]
+                last_persisted_history
+                if last_persisted_history is not None
+                else original_history
             )
             raise
 

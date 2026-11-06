@@ -1,14 +1,29 @@
 
 import json
 
-from app.database.db import get_connection
+from app.database.db import (
+    get_connection,
+    has_unique_conversation_message_index,
+)
+
+
+class ConversationRepositoryError(ValueError):
+    """Raised when conversation data cannot be safely read or saved."""
+
+
+class ConversationMigrationError(ConversationRepositoryError):
+    """Raised when legacy conversation data cannot be migrated safely."""
 
 
 class ConversationRepository:
 
     def initialize(self):
-        with get_connection() as connection:
+        with get_connection(
+            backup_before_conversation_migration=True
+        ) as connection:
             with connection:
+                connection.execute("BEGIN IMMEDIATE")
+
                 connection.execute("""
                     CREATE TABLE IF NOT EXISTS conversations (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -29,6 +44,86 @@ class ConversationRepository:
                             ON DELETE CASCADE
                     )
                 """)
+
+                duplicate_conversations = connection.execute(
+                    """
+                    SELECT conversation_id, COUNT(*) AS row_count
+                    FROM conversation_messages
+                    GROUP BY conversation_id
+                    HAVING COUNT(*) > 1
+                    ORDER BY conversation_id
+                    """
+                ).fetchall()
+
+                for duplicate in duplicate_conversations:
+                    rows = connection.execute(
+                        """
+                        SELECT id, history_json
+                        FROM conversation_messages
+                        WHERE conversation_id = ?
+                        ORDER BY updated_at DESC, id DESC
+                        """,
+                        (duplicate["conversation_id"],),
+                    ).fetchall()
+
+                    histories = set()
+                    for row in rows:
+                        try:
+                            history = json.loads(row["history_json"])
+                        except (json.JSONDecodeError, TypeError) as error:
+                            raise ConversationRepositoryError(
+                                "Stored history for conversation "
+                                f"{duplicate['conversation_id']} contains "
+                                "malformed JSON."
+                            ) from error
+
+                        try:
+                            self._validate_history(history)
+                        except ConversationRepositoryError as error:
+                            raise ConversationRepositoryError(
+                                "Stored history for conversation "
+                                f"{duplicate['conversation_id']} is invalid: "
+                                f"{error}"
+                            ) from error
+
+                        histories.add(
+                            json.dumps(
+                                history,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                                ensure_ascii=False,
+                            )
+                        )
+
+                    if len(histories) > 1:
+                        raise ConversationMigrationError(
+                            "Cannot migrate conversation "
+                            f"{duplicate['conversation_id']}: it has "
+                            f"{duplicate['row_count']} conflicting message "
+                            "histories. No histories were discarded."
+                        )
+
+                    connection.execute(
+                        """
+                        DELETE FROM conversation_messages
+                        WHERE conversation_id = ? AND id != ?
+                        """,
+                        (duplicate["conversation_id"], rows[0]["id"]),
+                    )
+
+                connection.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS
+                        idx_conversation_messages_conversation_id
+                    ON conversation_messages (conversation_id)
+                    """
+                )
+
+                if not has_unique_conversation_message_index(connection):
+                    raise ConversationMigrationError(
+                        "Could not enforce one message history per "
+                        "conversation."
+                    )
 
     def __init__(self):
         self.initialize()
@@ -55,10 +150,14 @@ class ConversationRepository:
         return conversation_id
 
     def save_history(self, conversation_id, history):
-        if not isinstance(history, list):
-            raise ValueError("History must be a list.")
+        self._validate_history(history)
 
-        history_json = json.dumps(history)
+        try:
+            history_json = json.dumps(history)
+        except (TypeError, ValueError, RecursionError) as error:
+            raise ConversationRepositoryError(
+                "History could not be serialized as JSON."
+            ) from error
 
         with get_connection() as connection:
             with connection:
@@ -123,7 +222,50 @@ class ConversationRepository:
         if row is None:
             return None
 
-        return json.loads(row["history_json"])
+        try:
+            history = json.loads(row["history_json"])
+        except (json.JSONDecodeError, TypeError) as error:
+            raise ConversationRepositoryError(
+                f"Stored history for conversation {conversation_id} "
+                "contains malformed JSON."
+            ) from error
+
+        try:
+            self._validate_history(history)
+        except ConversationRepositoryError as error:
+            raise ConversationRepositoryError(
+                f"Stored history for conversation {conversation_id} "
+                f"is invalid: {error}"
+            ) from error
+
+        return history
+
+    @staticmethod
+    def _validate_history(history):
+        if not isinstance(history, list):
+            raise ConversationRepositoryError("History must be a list.")
+
+        for index, message in enumerate(history):
+            if not isinstance(message, dict):
+                raise ConversationRepositoryError(
+                    f"History message {index} must be an object."
+                )
+
+            role = message.get("role")
+            if not isinstance(role, str) or not role.strip():
+                raise ConversationRepositoryError(
+                    f"History message {index} must have a non-empty role."
+                )
+
+            if "content" not in message or (
+                message["content"] is not None
+                and not isinstance(message["content"], str)
+            ):
+                raise ConversationRepositoryError(
+                    f"History message {index} must have text or null content."
+                )
+
+        return history
 
     def list_conversations(self):
         with get_connection() as connection:

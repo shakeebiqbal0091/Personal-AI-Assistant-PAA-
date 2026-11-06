@@ -1,6 +1,7 @@
 
 import pytest
 
+from app.database.db import get_connection
 from app.tools.task_manager import TaskManager
 
 
@@ -58,6 +59,54 @@ def test_delete_task(manager):
     assert manager.delete_task(task_id) is True
     assert manager.delete_task(task_id) is False
     assert manager.list_tasks() == []
+
+
+def test_delete_task_if_unchanged_deletes_matching_snapshot(manager):
+    task_id = manager.create_task("Temporary task", "Details")
+    task = manager.list_tasks()[0]
+
+    assert manager.delete_task_if_unchanged(
+        task_id,
+        task["title"],
+        task["description"],
+        task["status"],
+    ) is True
+    assert manager.list_tasks() == []
+
+
+@pytest.mark.parametrize(
+    ("field", "changed_value"),
+    [
+        ("title", "Changed title"),
+        ("description", "Changed details"),
+        ("status", "completed"),
+    ],
+)
+def test_delete_task_if_unchanged_preserves_changed_task(
+    manager, field, changed_value
+):
+    task_id = manager.create_task("Temporary task", "Details")
+    task = manager.list_tasks()[0]
+    snapshot = {
+        "title": task["title"],
+        "description": task["description"],
+        "status": task["status"],
+    }
+
+    with get_connection(manager.db_path) as connection:
+        with connection:
+            connection.execute(
+                f"UPDATE tasks SET {field} = ? WHERE id = ?",
+                (changed_value, task_id),
+            )
+
+    assert manager.delete_task_if_unchanged(
+        task_id,
+        snapshot["title"],
+        snapshot["description"],
+        snapshot["status"],
+    ) is False
+    assert len(manager.list_tasks()) == 1
 
 
 def test_invalid_status(manager):
