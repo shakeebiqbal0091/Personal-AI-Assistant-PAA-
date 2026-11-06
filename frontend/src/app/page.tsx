@@ -1,7 +1,8 @@
 
 "use client";
 
-import { useState } from "react";
+// import { useState } from "react";
+import { useState, useSyncExternalStore } from "react";
 
 import {
   LayoutDashboard,
@@ -59,6 +60,17 @@ const initialTasks = [
   },
 ];
 
+function toLocalISODate(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+const subscribeNoop = () => () => {};
+const getLocalToday = (): string | null => toLocalISODate(new Date());
+const getServerToday = (): string | null => null;
+
 export default function Dashboard() {
   const [activePage, setActivePage] = useState("Overview");
   const [tasks, setTasks] = useState(initialTasks);
@@ -68,9 +80,14 @@ export default function Dashboard() {
   const [chatMessages, setChatMessages] = useState<
    { id: number; text: string; sender: "user" | "assistant" }[]
   >([]);
-  const [selectedDate, setSelectedDate] = useState(
-    new Date().toISOString().slice(0, 10)
+  const today = useSyncExternalStore<string | null>(
+    subscribeNoop,
+    getLocalToday,
+    getServerToday
   );
+  const [pickedDate, setPickedDate] = useState<string | null>(null);
+  const selectedDate = pickedDate ?? today;
+
   const [calendarOpen, setCalendarOpen] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
@@ -345,14 +362,12 @@ export default function Dashboard() {
   >
     <CalendarDays size={18} />
     <span>
-      {new Date(selectedDate + "T12:00:00").toLocaleDateString(
+    {selectedDate
+     ? new Date(selectedDate + "T12:00:00").toLocaleDateString(
         "en-US",
-        {
-          weekday: "long",
-          month: "long",
-          day: "numeric",
-        }
-      )}
+        { weekday: "long", month: "long", day: "numeric" }
+      )
+      : "Today"}
     </span>
     <ChevronRight size={15} />
   </button>
@@ -363,8 +378,8 @@ export default function Dashboard() {
       <input
         id="paa-calendar"
         type="date"
-        value={selectedDate}
-        onChange={(event) => setSelectedDate(event.target.value)}
+        value={selectedDate ?? ""}
+        onChange={(event) => setPickedDate(event.target.value || null)}
       />
       <button
         type="button"

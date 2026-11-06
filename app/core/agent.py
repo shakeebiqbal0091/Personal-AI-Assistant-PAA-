@@ -1,6 +1,7 @@
 
 import json
 
+from app.core.clock import current_time_context
 from app.core.config import get_settings
 from app.core.llm import create_llm_client
 from app.core.intent_router import IntentRouter
@@ -262,6 +263,38 @@ TASK_TOOLS = [
     },
 ]
 
+MAX_HISTORY_MESSAGES = 20
+MAX_TOOL_ROUNDS = 5
+TEMPERATURE = 0.2  # tool-calling agent: low variance in arguments
+
+def trim_history(history: list[dict], keep: int = MAX_HISTORY_MESSAGES):
+    """Keep the system message plus roughly the last `keep` messages.
+
+    The window always starts on a user message, so an assistant tool_calls
+    message is never separated from its tool results (providers reject
+    orphaned tool messages with a 400).
+    """
+    system, rest = history[:1], history[1:]
+
+    if len(rest) <= keep:
+        return history
+
+    window = rest[-keep:]
+    start = next(
+        (i for i, m in enumerate(window) if m.get("role") == "user"),
+        None,
+    )
+
+    if start is None:
+        # One very long tool turn filled the window: keep that whole turn.
+        last_user = max(
+            (i for i, m in enumerate(rest) if m.get("role") == "user"),
+            default=0,
+        )
+        return system + rest[last_user:]
+
+    return system + window[start:]
+
 
 class PersonalAssistant:
 
@@ -272,52 +305,71 @@ class PersonalAssistant:
         conversation_id=None,
         conversation_repository=None,
     ):
-
         self.settings = get_settings()
-
         self.client = client or create_llm_client(self.settings)
-
         self.task_manager = task_manager or TaskManager()
-
         self.conversation_repository = (
             conversation_repository or ConversationRepository()
         )
 
-        if conversation_id is None:
+        # None until the first successful message: no empty rows in the DB.
+        self.conversation_id = conversation_id
+
+        saved_history = []
+
+        if conversation_id is not None:
+            saved_history = self.conversation_repository.get_history(
+                conversation_id
+            )
+
+            if saved_history is None:
+                raise ValueError("Conversation not found.")
+
+        self.conversation_history = self._new_history(saved_history)
+
+    # ==========================================
+    # HISTORY / PROMPT HELPERS
+    # ==========================================
+
+    @staticmethod
+    def _new_history(saved: list[dict]) -> list[dict]:
+        """System prompt lives in memory only; any system message stored
+        by older versions is dropped so prompt updates apply everywhere."""
+        return [{"role": "system", "content": SYSTEM_PROMPT}] + [
+            message for message in saved
+            if message.get("role") != "system"
+        ]
+
+    def _messages_for_model(self) -> list[dict]:
+        system = {
+            "role": "system",
+            "content": (
+                f"{SYSTEM_PROMPT}\n"
+                "CURRENT TIME\n\n"
+                f"{current_time_context(self.settings.user_tz)}\n"
+                'Resolve relative dates such as "today" or "tomorrow" '
+                "against this."
+            ),
+        }
+
+        return [system] + self.conversation_history[1:]
+
+    def _persist(self) -> None:
+        if self.conversation_id is None:
             self.conversation_id = (
                 self.conversation_repository.create_conversation()
             )
-        else:
-            self.conversation_id = conversation_id
 
-        saved_history = self.conversation_repository.get_history(
-            self.conversation_id
+        self.conversation_repository.save_history(
+            self.conversation_id,
+            self.conversation_history[1:],  # never store the system prompt
         )
-
-        if saved_history is None:
-            raise ValueError("Conversation not found.")
-
-        self.conversation_history = (
-            saved_history or [
-                {
-                    "role": "system",
-                    "content": SYSTEM_PROMPT,
-                }
-            ]
-        )
-
-        if (
-            not self.conversation_history
-            or self.conversation_history[0].get("role") != "system"
-        ):
-            raise ValueError("Invalid conversation history.")
 
     # ==========================================
     # STRUCTURED TOOL EXECUTION
     # ==========================================
 
     def _execute_tool(self, name: str, arguments: dict) -> dict:
-
         try:
             return IntentRouter.route(
                 intent_name=name,
@@ -326,7 +378,6 @@ class PersonalAssistant:
             )
 
         except ValueError as error:
-
             return {
                 "success": False,
                 "error": "invalid_arguments",
@@ -334,7 +385,6 @@ class PersonalAssistant:
             }
 
         except Exception:
-
             return {
                 "success": False,
                 "error": "execution_failed",
@@ -346,7 +396,6 @@ class PersonalAssistant:
     # ==========================================
 
     def chat(self, user_message: str) -> str:
-
         user_message = user_message.strip()
 
         if not user_message:
@@ -355,39 +404,24 @@ class PersonalAssistant:
         original_length = len(self.conversation_history)
 
         self.conversation_history.append(
-            {
-                "role": "user",
-                "content": user_message,
-            }
+            {"role": "user", "content": user_message}
         )
 
         try:
-
-            for _ in range(5):
-
+            for _ in range(MAX_TOOL_ROUNDS):
                 response = self.client.chat.completions.create(
                     model=self.settings.model,
-                    messages=self.conversation_history,
+                    messages=self._messages_for_model(),
                     tools=TASK_TOOLS,
                     tool_choice="auto",
-                    temperature=0.7,
+                    temperature=TEMPERATURE,
                 )
 
                 message = response.choices[0].message
-
-                tool_calls = getattr(
-                    message,
-                    "tool_calls",
-                    None,
-                )
-
-                # No tool requested: return normal AI response.
+                tool_calls = getattr(message, "tool_calls", None)
 
                 if not tool_calls:
-
-                    assistant_message = (
-                        message.content or ""
-                    ).strip()
+                    assistant_message = (message.content or "").strip()
 
                     if not assistant_message:
                         raise RuntimeError(
@@ -395,56 +429,35 @@ class PersonalAssistant:
                         )
 
                     self.conversation_history.append(
-                        {
-                            "role": "assistant",
-                            "content": assistant_message,
-                        }
+                        {"role": "assistant", "content": assistant_message}
                     )
 
-                    # Keep the system prompt and recent conversation.
-                    self.conversation_history = (
-                        self.conversation_history[:1]
-                        + self.conversation_history[1:][-20:]
+                    self.conversation_history = trim_history(
+                        self.conversation_history
                     )
-
-                    self.conversation_repository.save_history(
-                        self.conversation_id,
-                        self.conversation_history,
-                    )
+                    self._persist()
 
                     return assistant_message
-
-                # Store assistant tool requests.
 
                 self.conversation_history.append(
                     {
                         "role": "assistant",
                         "content": message.content,
                         "tool_calls": [
-                            call.model_dump()
-                            for call in tool_calls
+                            call.model_dump() for call in tool_calls
                         ],
                     }
                 )
 
-                # Execute requested tools.
-
                 for call in tool_calls:
-
-                    name = call.function.name
-
                     try:
-                        arguments = json.loads(
-                            call.function.arguments
-                        )
-
+                        arguments = json.loads(call.function.arguments)
                         result = self._execute_tool(
-                            name,
+                            call.function.name,
                             arguments,
                         )
 
                     except (json.JSONDecodeError, TypeError):
-
                         result = {
                             "success": False,
                             "error": "invalid_arguments",
@@ -459,23 +472,13 @@ class PersonalAssistant:
                         }
                     )
 
-            raise RuntimeError(
-                "Maximum tool execution rounds reached."
-            )
+            raise RuntimeError("Maximum tool execution rounds reached.")
 
         except Exception:
-
-            # Restore the original conversation if AI processing fails.
-
+            # Nothing is persisted mid-turn, so restoring memory is enough.
             self.conversation_history = (
                 self.conversation_history[:original_length]
             )
-
-            self.conversation_repository.save_history(
-                self.conversation_id,
-                self.conversation_history,
-            )
-
             raise
 
     # ==========================================
@@ -483,15 +486,7 @@ class PersonalAssistant:
     # ==========================================
 
     def reset_conversation(self) -> None:
+        self.conversation_history = self._new_history([])
 
-        self.conversation_history = [
-            {
-                "role": "system",
-                "content": SYSTEM_PROMPT,
-            }
-        ]
-
-        self.conversation_repository.save_history(
-            self.conversation_id,
-            self.conversation_history,
-        )
+        if self.conversation_id is not None:
+            self._persist()

@@ -1,5 +1,6 @@
 import os
 from dataclasses import dataclass
+from functools import lru_cache
 
 from dotenv import load_dotenv
 
@@ -11,8 +12,10 @@ class Settings:
     base_url: str
     model: str
     debug: bool
+    user_tz: str = "UTC"
 
 
+@lru_cache(maxsize=1)
 def get_settings() -> Settings:
     load_dotenv()
 
@@ -34,4 +37,8 @@ def get_settings() -> Settings:
         ),
         model=model,
         debug=os.getenv("DEBUG", "False").lower() == "true",
+        user_tz=os.getenv("USER_TZ", "UTC").strip() or "UTC",
     )
+
+
+    

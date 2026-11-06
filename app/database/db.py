@@ -14,14 +14,17 @@ def get_connection(db_path=None):
     database_path = Path(db_path) if db_path else DEFAULT_DB_PATH
     database_path.parent.mkdir(parents=True, exist_ok=True)
 
-    connection = sqlite3.connect(database_path)
+    connection = sqlite3.connect(database_path, timeout=10)
     connection.row_factory = sqlite3.Row
 
     try:
+        # Per-connection: FK enforcement is OFF by default in SQLite.
+        connection.execute("PRAGMA foreign_keys = ON")
+        # Persistent on the file; lets Streamlit/FastAPI read while writing.
+        connection.execute("PRAGMA journal_mode = WAL")
         yield connection
     finally:
         connection.close()
-
 
 def initialize_database(db_path=None):
     with get_connection(db_path) as connection:

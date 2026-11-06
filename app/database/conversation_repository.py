@@ -140,7 +140,6 @@ class ConversationRepository:
     def delete_conversation(self, conversation_id):
         with get_connection() as connection:
             with connection:
-                connection.execute("PRAGMA foreign_keys = ON")
 
                 cursor = connection.execute(
                     "DELETE FROM conversations WHERE id = ?",
